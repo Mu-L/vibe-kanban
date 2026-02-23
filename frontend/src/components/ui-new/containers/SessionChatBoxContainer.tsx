@@ -5,8 +5,8 @@ import { useDropzone } from 'react-dropzone';
 import {
   type AskUserQuestionItem,
   type Session,
-  type ToolStatus,
   type BaseCodingAgent,
+  ExecutionProcessStatus,
 } from 'shared/types';
 import { useAttemptExecution } from '@/hooks/useAttemptExecution';
 import { useAttemptRepo } from '@/hooks/useAttemptRepo';
@@ -28,6 +28,7 @@ import { useMessageEditRetry } from '@/hooks/useMessageEditRetry';
 import { useBranchStatus } from '@/hooks/useBranchStatus';
 import { useAttemptBranch } from '@/hooks/useAttemptBranch';
 import { useApprovalMutation } from '@/hooks/useApprovalMutation';
+import { useApprovals } from '@/hooks/useApprovals';
 import { ResolveConflictsDialog } from '@/components/ui-new/dialogs/ResolveConflictsDialog';
 import { workspaceSummaryKeys } from '@/components/ui-new/hooks/useWorkspaces';
 import { buildAgentPrompt } from '@/utils/promptMessage';
@@ -172,33 +173,45 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   const { entries } = useEntries();
   const tokenUsageInfo = useTokenUsage();
 
-  // Extract pending approval metadata from entries (needed for scratchId)
+  // Execution state
+  const { isAttemptRunning, stopExecution, isStopping, processes } =
+    useAttemptExecution(workspaceId);
+
+  // Approvals state
+  const { getPendingForProcess } = useApprovals();
+
+  // Get pending approval from running processes
   const pendingApproval = useMemo(() => {
-    for (const entry of entries) {
-      if (entry.type !== 'NORMALIZED_ENTRY') continue;
-      const entryType = entry.content.entry_type;
-      if (
-        entryType.type === 'tool_use' &&
-        entryType.status.status === 'pending_approval'
-      ) {
-        const status = entryType.status as Extract<
-          ToolStatus,
-          { status: 'pending_approval' }
-        >;
-        const questions: AskUserQuestionItem[] | undefined =
-          entryType.action_type.action === 'ask_user_question'
-            ? entryType.action_type.questions
-            : undefined;
+    const runningProcesses = processes.filter(
+      (p) => p.status === ExecutionProcessStatus.running
+    );
+    for (const proc of runningProcesses) {
+      const info = getPendingForProcess(proc.id);
+      if (info) {
+        let questions: AskUserQuestionItem[] | undefined;
+        for (const entry of entries) {
+          if (entry.type !== 'NORMALIZED_ENTRY') continue;
+          const entryType = entry.content.entry_type;
+          if (
+            entryType.type === 'tool_use' &&
+            entryType.status.status === 'pending_approval' &&
+            entryType.status.approval_id === info.approval_id &&
+            entryType.action_type.action === 'ask_user_question'
+          ) {
+            questions = entryType.action_type.questions;
+            break;
+          }
+        }
         return {
-          approvalId: status.approval_id,
-          timeoutAt: status.timeout_at,
-          executionProcessId: entry.executionProcessId,
+          approvalId: info.approval_id,
+          timeoutAt: info.timeout_at,
+          executionProcessId: info.execution_process_id,
           questions,
         };
       }
     }
     return null;
-  }, [entries]);
+  }, [processes, getPendingForProcess, entries]);
 
   // Use approval_id as scratch key when pending approval exists to avoid
   // prefilling approval response with queued follow-up message
@@ -208,10 +221,6 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     }
     return isNewSessionMode ? workspaceId : sessionId;
   }, [pendingApproval?.approvalId, isNewSessionMode, workspaceId, sessionId]);
-
-  // Execution state
-  const { isAttemptRunning, stopExecution, isStopping, processes } =
-    useAttemptExecution(workspaceId);
 
   // Get repos for file search
   const { repos } = useAttemptRepo(workspaceId);
